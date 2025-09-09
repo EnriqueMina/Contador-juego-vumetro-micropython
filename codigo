@@ -1,0 +1,206 @@
+from machine import Pin, PWM
+import utime, urandom
+
+# Tabla para mostrar los dígitos
+DIGITS = [0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7D,0x07,0x7F,0x6F]
+
+button_map = {
+    0x1:1, 0x100:2, 0x10000:3, 0x1000000:4,
+    0x10:5, 0x1000:6, 0x100000:7, 0x10000000:8
+}
+
+class TM1638:
+    def __init__(self, dio, clk, stb):
+        # Configura los pines
+        self.dio = Pin(dio, Pin.OUT)
+        self.clk = Pin(clk, Pin.OUT)
+        self.stb = Pin(stb, Pin.OUT)
+        self.init()
+       -,l 
+ # Pulso de reloj para enviar datos
+    def pulse(self):
+        self.clk.off(); utime.sleep_us(5)
+        self.clk.on(); utime.sleep_us(5)
+        
+ # Envía un byte
+    def writeByte(self, data):
+        for i in range(8):
+            self.dio.value((data >> i) & 1)
+            self.pulse()
+            
+ # Lee el estado
+    def readButtons(self):
+        self.stb.off()
+        self.writeByte(0x42) #leer botones
+        self.dio.init(Pin.IN, Pin.PULL_UP)
+        val = 0
+        for i in range(4):
+            d = 0
+            for j in range(8):
+                self.clk.off()
+                d |= self.dio.value() << j
+                self.clk.on()
+            val |= (d << (i * 8))
+        self.stb.on()
+        self.dio.init(Pin.OUT)
+        return val
+    
+# inicializa el display
+    def init(self):
+        self.stb.off()
+        self.writeByte(0x88 | 3)
+        self.stb.on()
+
+    def setDisplay(self, value):
+        s = str(value) if isinstance(value, int) else str(value)
+        s = (" " * (8 - len(s)) + s)[-8:]
+        self.stb.off()
+        self.writeByte(0x40)
+        self.stb.on()
+        self.stb.off()
+        self.writeByte(0xC0)
+        for ch in s:
+            self.writeByte(DIGITS[int(ch)] if ch.isdigit() else 0)
+            self.writeByte(0)
+        self.stb.on()
+        
+# enciende y apaga un led
+    def setLED(self, i, state):
+        self.stb.off()
+        self.writeByte(0x44)  # Comando para LED individual
+        self.stb.on()
+        self.stb.off()
+        self.writeByte(0xC1 + (i << 1)) # Dirección del LED
+        self.writeByte(1 if state else 0)
+        self.stb.on()
+        
+ # Enciende varios LEDs
+    def setLEDs(self, n, state=True):
+        for i in range(n):
+            self.setLED(i, state)
+            
+  # Apaga todos los LEDs y display
+    def clear(self):
+        self.stb.off()
+        self.writeByte(0x40)
+        self.stb.on()
+        self.stb.off()
+        self.writeByte(0xC0)
+        for _ in range(16):
+            self.writeByte(0)  # Limpia todos los dígitos
+        self.stb.on()
+
+buzzer = PWM(Pin(5))
+
+# Función para emitir un sonido
+def beep(freq, ms):
+    buzzer.freq(freq)
+    buzzer.duty(512)
+    utime.sleep_ms(ms)
+    buzzer.duty(0)
+
+# Inicializa el TM1638
+tm = TM1638(21, 22, 23)
+
+# Función para leer el botón presionado
+def leerBoton():
+    val = tm.readButtons()
+    return button_map[val] if val in button_map else None
+
+def contador():
+    tm.clear()
+    c, asc = 0, True
+    while True:
+        tm.setDisplay(c)
+        b = leerBoton()
+        if b == 1: 
+            asc = not asc # Cambia dirección al presionar botón 1
+            beep(2000, 100)
+        if b == 7: 
+            return # Sale de la función si se presiona botón 7
+        c = (c + 1 if asc else c - 1) % 100000000
+        utime.sleep_ms(300)
+
+def juego():
+    tm.clear()
+    ac, er, t = 0, 0, 0
+    for _ in range(6):
+        led = urandom.getrandbits(3)
+        correct = led + 1
+        tm.clear()
+        for l in range(8):
+            tm.setLED(l, l == led) # Enciende solo el LED seleccionado
+        tm.setDisplay(correct)
+
+        start = utime.ticks_ms()
+        presionado = False
+        boton = -1
+        while not presionado:
+            b = leerBoton()
+            if b == 7:
+                return
+            if b:
+                boton = b
+                presionado = True
+
+        tiempo = utime.ticks_diff(utime.ticks_ms(), start)
+        if boton == correct:
+            ac += 1
+            t += tiempo
+            tm.setDisplay(tiempo)
+            beep(2500, 80)
+        else:
+            er += 1
+            tm.setDisplay(9999)
+            beep(600, 200)
+
+        utime.sleep_ms(1200)
+        tm.clear()
+        for l in range(8):
+            tm.setLED(l, 0)
+
+    prom = t // ac if ac else 0
+    for x in (ac, er, prom):
+        tm.setDisplay(x)
+        utime.sleep_ms(1500)
+    tm.clear()
+
+# VUMETRO 
+def animacion_reset():
+    for _ in range(3):
+        tm.setLEDs(8, True)
+        beep(1200, 100)
+        utime.sleep_ms(200)
+        tm.setLEDs(8, False)
+        utime.sleep_ms(200)
+
+def vumetro():
+    nivel = 0
+    tm.clear()
+    while True:
+        b = leerBoton()
+        if b == 1:
+            nivel += 1
+            if nivel > 8:
+                animacion_reset()
+                nivel = 0
+                tm.clear()
+            else:
+                tm.setLEDs(nivel, True)
+                beep(1000 + nivel * 100, 40)
+                utime.sleep_ms(50)
+                tm.setDisplay(nivel)
+        if b == 7:
+            tm.clear()
+            return
+        utime.sleep_ms(150)
+
+# MENU PRINCIPAL
+while True:
+    b = leerBoton()
+    if b == 1: contador()
+    if b == 2: juego()
+    if b == 3: vumetro()
+    if b == 7: 
+        tm.clear()
+        utime.sleep_ms(500)
